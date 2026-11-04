@@ -1,0 +1,327 @@
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report
+)
+
+print("=" * 55)
+print(" STOCK MARKET TREND PREDICTION USING DATA MINING")
+print("=" * 55)
+
+ticker = input(
+    "Enter stock symbol (e.g. AAPL, TCS.NS, RELIANCE.NS): "
+).strip().upper()
+
+if not ticker:
+    ticker = "AAPL"
+
+print("\nDownloading stock market data...")
+
+data = yf.download(
+    ticker,
+    period="5y",
+    interval="1d",
+    auto_adjust=True,
+    progress=False
+)
+
+if data.empty:
+    raise ValueError(
+        "No stock data found. Please check the stock symbol "
+        "and your internet connection."
+    )
+
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+
+required_columns = ["Open", "High", "Low", "Close", "Volume"]
+
+for column in required_columns:
+    if column not in data.columns:
+        raise ValueError(f"Missing required column: {column}")
+
+data = data[required_columns].copy()
+data.dropna(inplace=True)
+
+print("\nStock data downloaded successfully!")
+print(data.head())
+
+print("\nPreparing data...")
+
+data["Daily_Return"] = data["Close"].pct_change()
+
+data["Price_Range"] = (
+    data["High"] - data["Low"]
+) / data["Close"]
+
+data["Open_Close_Change"] = (
+    data["Close"] - data["Open"]
+) / data["Open"]
+
+data["Volume_Change"] = data["Volume"].pct_change()
+
+data["MA_5"] = data["Close"].rolling(window=5).mean()
+data["MA_10"] = data["Close"].rolling(window=10).mean()
+data["MA_20"] = data["Close"].rolling(window=20).mean()
+
+delta = data["Close"].diff()
+
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+
+average_gain = gain.rolling(window=14).mean()
+average_loss = loss.rolling(window=14).mean()
+
+relative_strength = average_gain / average_loss.replace(0, np.nan)
+
+data["RSI_14"] = 100 - (
+    100 / (1 + relative_strength)
+)
+
+data["MA_Ratio_5"] = data["Close"] / data["MA_5"]
+data["MA_Ratio_10"] = data["Close"] / data["MA_10"]
+data["MA_Ratio_20"] = data["Close"] / data["MA_20"]
+
+data["Next_Close"] = data["Close"].shift(-1)
+
+data["Target"] = (
+    data["Next_Close"] > data["Close"]
+).astype(int)
+
+data.replace([np.inf, -np.inf], np.nan, inplace=True)
+data.dropna(inplace=True)
+
+if len(data) < 100:
+    raise ValueError(
+        "Not enough data to train the models. "
+        "Try another stock symbol."
+    )
+
+print("\nPreprocessed data:")
+print(data.tail())
+
+features = [
+    "Daily_Return",
+    "Price_Range",
+    "Open_Close_Change",
+    "Volume_Change",
+    "MA_5",
+    "MA_10",
+    "MA_20",
+    "RSI_14",
+    "MA_Ratio_5",
+    "MA_Ratio_10",
+    "MA_Ratio_20"
+]
+
+X = data[features]
+y = data["Target"]
+
+split_index = int(len(data) * 0.80)
+
+X_train = X.iloc[:split_index]
+X_test = X.iloc[split_index:]
+
+y_train = y.iloc[:split_index]
+y_test = y.iloc[split_index:]
+
+print("\nTraining records:", len(X_train))
+print("Testing records:", len(X_test))
+
+print("\nTraining Logistic Regression model...")
+
+logistic_model = Pipeline([
+    ("scaler", StandardScaler()),
+    ("model", LogisticRegression(max_iter=1000))
+])
+
+logistic_model.fit(X_train, y_train)
+
+logistic_predictions = logistic_model.predict(X_test)
+
+print("\nTraining Random Forest model...")
+
+random_forest_model = RandomForestClassifier(
+    n_estimators=200,
+    max_depth=8,
+    random_state=42,
+    class_weight="balanced"
+)
+
+random_forest_model.fit(X_train, y_train)
+
+rf_predictions = random_forest_model.predict(X_test)
+
+
+def evaluate_model(name, actual, predicted):
+
+    accuracy = accuracy_score(actual, predicted)
+
+    precision = precision_score(
+        actual, predicted, zero_division=0
+    )
+
+    recall = recall_score(
+        actual, predicted, zero_division=0
+    )
+
+    f1 = f1_score(
+        actual, predicted, zero_division=0
+    )
+
+    print("\n" + "=" * 45)
+    print(name)
+    print("=" * 45)
+
+    print(f"Accuracy  : {accuracy * 100:.2f}%")
+    print(f"Precision : {precision * 100:.2f}%")
+    print(f"Recall    : {recall * 100:.2f}%")
+    print(f"F1 Score  : {f1 * 100:.2f}%")
+
+    print("\nClassification Report:")
+    print(
+        classification_report(
+            actual,
+            predicted,
+            zero_division=0
+        )
+    )
+
+    print("Confusion Matrix:")
+    print(confusion_matrix(actual, predicted))
+
+    return accuracy
+
+
+logistic_accuracy = evaluate_model(
+    "LOGISTIC REGRESSION",
+    y_test,
+    logistic_predictions
+)
+
+rf_accuracy = evaluate_model(
+    "RANDOM FOREST",
+    y_test,
+    rf_predictions
+)
+
+comparison = pd.DataFrame({
+    "Model": ["Logistic Regression", "Random Forest"],
+    "Accuracy (%)": [
+        logistic_accuracy * 100,
+        rf_accuracy * 100
+    ]
+})
+
+print("\nMODEL COMPARISON")
+print(comparison.to_string(index=False))
+
+best_model = (
+    logistic_model
+    if logistic_accuracy >= rf_accuracy
+    else random_forest_model
+)
+
+best_model_name = (
+    "Logistic Regression"
+    if logistic_accuracy >= rf_accuracy
+    else "Random Forest"
+)
+
+print("\nBest model based on test accuracy:", best_model_name)
+
+latest_data = data[features].iloc[[-1]]
+
+next_prediction = best_model.predict(latest_data)[0]
+
+probabilities = best_model.predict_proba(latest_data)[0]
+
+up_probability = probabilities[1] * 100
+down_probability = probabilities[0] * 100
+
+print("\n" + "=" * 55)
+print(" NEXT TRADING DAY TREND ESTIMATE")
+print("=" * 55)
+
+print("Stock Symbol:", ticker)
+
+if next_prediction == 1:
+    print("Predicted Trend: UPWARD")
+else:
+    print("Predicted Trend: DOWNWARD")
+
+print(f"Estimated probability of UP: {up_probability:.2f}%")
+print(f"Estimated probability of DOWN: {down_probability:.2f}%")
+
+print("\nNote: This is an educational model, not financial advice.")
+
+importance = pd.Series(
+    random_forest_model.feature_importances_,
+    index=features
+).sort_values()
+
+plt.figure(figsize=(10, 6))
+importance.plot(kind="barh")
+
+plt.title("Feature Importance - Random Forest")
+plt.xlabel("Importance")
+plt.ylabel("Features")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+
+plt.plot(
+    data.index,
+    data["Close"],
+    label="Closing Price"
+)
+
+plt.plot(
+    data.index,
+    data["MA_20"],
+    label="20-Day Moving Average"
+)
+
+plt.plot(
+    data.index,
+    data["Close"].rolling(50).mean(),
+    label="50-Day Moving Average"
+)
+
+plt.title(f"{ticker} Stock Price Analysis")
+plt.xlabel("Date")
+plt.ylabel("Stock Price")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8, 5))
+
+plt.bar(
+    comparison["Model"],
+    comparison["Accuracy (%)"]
+)
+
+plt.title("Model Accuracy Comparison")
+plt.xlabel("Machine Learning Models")
+plt.ylabel("Accuracy (%)")
+plt.ylim(0, 100)
+plt.tight_layout()
+plt.show()
+
+print("\nProject executed successfully!")
